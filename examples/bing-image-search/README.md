@@ -26,11 +26,19 @@ Com isso já temos um Bot conectado à plataforma que consegue enviar e receber 
 
 Agora precisamos ativar a sua conta da Microsoft para usar o serviço Bing News Search API. Isto pode ser feito acessando-se url https://www.microsoft.com/cognitive-services/en-us/bing-news-search-api. Clique em Letsgo e selecione Bing Search. Após aceitar os termos você terá acesso à sua chave.
 
+_Sugestoes Lrodlima: eu acrescentaria algumas fotos da configuração da plataforma, mais passo a passo. Não está claro qual chave de autenticação usar, o BING parece fornecer duas._
+
 ## Passo 4 - Mão na massa
 
 Primeiramente precisamos criar um servidor HTTP Node que recebe as mensagens através da url para receber mensagens que configuramos no passo 2.
 
 ```javascript
+'use strict';
+
+let http = require('http');
+let BingImageSearchBot = require('./BingImageSearchBot');
+let config = require('../application.json');
+
 const SERVER_PORT = process.env.PORT || 3000;
 
 let server = http.createServer((req, res) => {
@@ -58,14 +66,15 @@ server.listen(SERVER_PORT, () => {
 Como próximo passo, precisamos abstrair o envio de mensagens. Para isto vamos criar uma classe `MessagingHubHttpClient` que, suprida com a urls para envio de mensagens e a chave de acesso do bot, envia mensagens através de requisições HTTP:
 
 ```javascript
+'use strict';
+
 let request = require('request-promise');
 const MESSAGES_URL = 'https://msging.net/messages';
 
 class MessagingHubHttpClient {
 
-    // O cabeçalho de autenticação obtido ao configurar o Bot será passado para este construtor
-    constructor(authHeader) {
-        this._authHeader = `Key ${authHeader}`;
+    constructor(accessKey) {
+        this._authHeader = `Key ${accessKey}`;
     }
 
     sendMessage(message) {
@@ -81,6 +90,8 @@ class MessagingHubHttpClient {
         });
     }
 }
+
+module.exports = MessagingHubHttpClient
 ```
 
 O que nos resta agora é efetivamente tratar as mensagens recebidas, isto é, definir a função `handleMessage` utilizada no servidor HTTP definido acima. Porém, antes, iremos definir uma função para buscar imagens utilizando a api de busca de imagens do Bing:
@@ -101,50 +112,76 @@ function searchImage(query) {
 ```
 
 ```javascript
-// Substitua {SEU_CABECALHO_DE_AUTENTICACAO} pelo cabeçalho de autenticação obtido ao criar seu Bot no Painel Blip
-let client = new MessagingHubHttpClient('{SEU_CABECALHO_DE_AUTENTICACAO}');
+'use strict';
 
-function handleMessage(message) {
-    if (message.type !== 'text/plain') {
-        return;
+let uuid = require('uuid');
+let request = require('request-promise');
+let MessagingHubHttpClient = require('./MessagingHubHttpClient');
+
+const MEDIA_TYPES = {
+    TEXT_PLAIN: 'text/plain',
+    MEDIA_LINK: 'application/vnd.lime.media-link+json'
+};
+const BING_SERVICE_URI = 'https://api.cognitive.microsoft.com/bing/v5.0/images/search';
+
+class BingImageSearchBot {
+
+    constructor(config) {
+        this._bingApiKey = config.settings.bingApiKey;
+        this._client = new MessagingHubHttpClient(config.accessKey);
+        console.log('starting');
     }
 
-    // Obtem o conteudo da mensagem recebida pelo contato
-    let query = message.content.toString();
+    handleMessage(message) {
+        if (message.type !== 'text/plain') {
+            return;
+        }
 
-    // Faz a chamada na API de busca do Bing
-    searchImage(query)
-        .then(data => {
-            // Cria uma nova mensagem para responder o usuario que enviou a mensagem.
-            // O campo `to` da messagem deve ser igual ao campo `from` da mensagem recebida
-            let response = {
-                id: uuid.v4(),
-                to: message.from
-            };
+        let query = message.content.toString();
 
-            if (data.value.length === 0) {
-                // Cria um conteudo de somente texto para a mensagem de resposta
-                response.content = `Nenhuma imagem encontrada para o termo '${query}'`;
-                response.type = 'text/plain';
-            }
-            else {
-                let image = data.value[0];
-
-                // Cria um conteudo de imagem para a mensagem de resposta
-                response.content = {
-                    uri: image.contentUrl,
-                    type: `image/${image.encodingFormat}`,
-                    previewUri: image.thumbnailUrl,
-                    previewType: `image/${image.encodingFormat}`,
-                    size: parseInt(image.contentSize.match(/\d*/)[0])
+        this._searchImage(query)
+            .then(data => {
+                let response = {
+                    id: uuid.v4(),
+                    to: message.from
                 };
-                response.type = 'application/vnd.lime.media-link+json';
-            }
 
-            // Responde a mensagem para o usuario
-            return client.sendMessage(response);
+                if (data.value.length === 0) {
+                    response.content = `Nenhuma imagem encontrada para o termo '${query}'`;
+                    response.type = MEDIA_TYPES.TEXT_PLAIN;
+                } else {
+                    let image = data.value[0];
+
+                    response.content = {
+                        uri: image.contentUrl,
+                        type: `image/${image.encodingFormat}`,
+                        previewUri: image.thumbnailUrl,
+                        previewType: `image/${image.encodingFormat}`,
+                        size: parseInt(image.contentSize.match(/\d*/)[0])
+                    };
+                    response.type = MEDIA_TYPES.MEDIA_LINK;
+                }
+
+                return this._client.sendMessage(response);
+            })
+            .catch(error => {
+                console.log(error);
+            });
+    }
+
+    _searchImage(query) {
+        return request({
+            method: 'GET',
+            uri: `${BING_SERVICE_URI}?q=${query}&mkt=pt-br`,
+            headers: {
+                'Ocp-Apim-Subscription-Key': this._bingApiKey
+            },
+            json: true
         });
+    }
 }
+
+module.exports = BingImageSearchBot;
 ```
 
 ## Passo 5 - Hospedando o Bot
